@@ -1,0 +1,31 @@
+1. Open a terminal inside this exact folder.
+2. Install dependencies:
+   python -m pip install -r requirements.txt
+3. Start the application:
+   python -m streamlit run app.py
+4. Open STRATEGY LAB.
+5. Open RESEARCH.
+6. The first inner tab is DRAWDOWNS.
+
+The screen must show:
+FINAL BUILD v8.4 // Signals and Active Position use adjusted OHLC; charts and displayed levels use actual market prices. Drawdown Analysis is under RESEARCH -> DRAWDOWNS
+
+If it does not, a different/older project folder is running. Stop Streamlit with Ctrl+C and start it again from this folder.
+
+VALUATION NOTE
+- Backtest performance, benchmark, drawdown and trade returns use adjusted total-return prices when available.
+- Security price charts and displayed entry/exit prices use actual unadjusted market prices.
+
+
+V8.5 FIX: the Security Report no longer crashes when YEARLY has insufficient post-warm-up Composite observations. Quarterly/Monthly/Weekly remain available and the annual state is shown as unavailable.
+
+MARITIME INTELLIGENCE / AISSTREAM
+================================
+1. Copy .env.example to a new file named .env
+2. Open .env and replace replace_with_your_key with your AISStream API key
+3. Install dependencies: python -m pip install -r requirements.txt
+4. Restart the application: python -m streamlit run app.py
+5. Open MARITIME INTELLIGENCE from the sidebar
+
+The key is intentionally NOT included in this ZIP and .env is excluded from Git.
+The map refreshes every 10 seconds while a background WebSocket collector receives live AIS messages.
