@@ -1,142 +1,62 @@
 from __future__ import annotations
 
-from analysis.regime.models import RegimeLayer, RegimePillar
-from views.overview import _fallback_briefing_text
+import pandas as pd
 
-_BANNED_WORDS = [
-    "structural", "structurally",
-    "tactical", "tactically",
-    "score", "confidence", "pillar", "regime", "coverage",
-]
+from macro.models import ConfidenceAssessment, ExecutiveMarketThesis
+from views.overview import _build_market_context, _thesis_fallback_text
 
 
-def _pillar(name: str, state: str) -> RegimePillar:
-    return RegimePillar(
-        name=name,
-        score=0.0,
-        state=state,
-        details=f"{name} detail",
-        available_inputs=3,
-        expected_inputs=3,
+def _thesis(**overrides) -> ExecutiveMarketThesis:
+    base = dict(
+        headline="The cross-asset read is constructive, with moderate confidence in the underlying data.",
+        directional_view="RISK-ON",
+        confidence=ConfidenceAssessment(score=65, label="MODERATE", breakdown={}, notes=()),
+        what_changed=("Tactical market regime shifted from IMPROVING to DETERIORATING.",),
+        why_it_matters=("Expanding liquidity is typically a tailwind for risk assets broadly.",),
+        cross_asset_implications=("EQUITIES: Equity tactical pillar: POSITIVE.",),
+        top_opportunities=("Expanding growth data may support cyclical sectors.",),
+        major_risks=("Elevated inflation keeps the door open to further tightening.",),
+        freshness_summary="Growth: CURRENT; Inflation: CURRENT; Liquidity: CURRENT",
+        generated_at=pd.Timestamp.now(tz="UTC"),
     )
+    base.update(overrides)
+    return ExecutiveMarketThesis(**base)
 
 
-def _layer(key: str, diagnosis: str, previous_diagnosis: str, pillar_states: dict[str, str]) -> RegimeLayer:
-    return RegimeLayer(
-        key=key,
-        title=key.title(),
-        horizon="n/a",
-        diagnosis=diagnosis,
-        score=0.0,
-        previous_diagnosis=previous_diagnosis,
-        previous_score=0.0,
-        pillars=[_pillar(name, state) for name, state in pillar_states.items()],
+# Command Center's AI-chat fallback text is now derived directly from the
+# shared Executive Market Thesis (Macro & Rates is the source of truth) —
+# these tests replace the old asset-class-sentence-builder tests that
+# exercised `_fallback_briefing_text`, which no longer exists.
+
+
+def test_thesis_fallback_text_includes_headline_and_all_sections():
+    text = _thesis_fallback_text(_thesis())
+    assert "constructive" in text
+    assert "**What Changed**" in text
+    assert "**Top Opportunities**" in text
+    assert "**Major Risks**" in text
+    assert "Tactical market regime shifted" in text
+
+
+def test_thesis_fallback_text_omits_empty_sections():
+    text = _thesis_fallback_text(_thesis(what_changed=(), top_opportunities=(), major_risks=()))
+    assert "**What Changed**" not in text
+    assert "**Top Opportunities**" not in text
+    assert "**Major Risks**" not in text
+
+
+def test_build_market_context_carries_thesis_fields_and_breadth():
+    table = pd.DataFrame(
+        [
+            {"Strumento": "S&P 500", "Ultimo": 5000.0, "1D %": 1.2},
+            {"Strumento": "VIX", "Ultimo": 15.0, "1D %": -2.0},
+        ]
     )
+    reading = {"positive": 1, "total": 2}
+    context = _build_market_context(table, reading, _thesis())
 
-
-def _regime_results(strategic: dict[str, str], tactical: dict[str, str], daily: dict[str, str]) -> dict:
-    return {
-        "STRATEGIC": _layer("STRATEGIC", "CONSTRUCTIVE", "NEUTRAL / TRANSITION", strategic),
-        "TACTICAL": _layer("TACTICAL", "STABLE / MIXED", "IMPROVING", tactical),
-        "DAILY": _layer("DAILY", "MIXED", "RISK-ON", daily),
-    }
-
-
-def _reading(positive: int = 8, total: int = 16) -> dict:
-    return {"leader": None, "laggard": None, "vix": None, "positive": positive, "total": total}
-
-
-def _uniform_states(state: str) -> dict[str, str]:
-    return {
-        "EQUITY": state,
-        "RATES": state,
-        "CREDIT": state,
-        "MACRO": state,
-        "VOLATILITY": state,
-    }
-
-
-def test_briefing_never_exposes_internal_model_vocabulary() -> None:
-    regime_results = _regime_results(
-        _uniform_states("POSITIVE"),
-        _uniform_states("NEUTRAL"),
-        _uniform_states("NEGATIVE"),
-    )
-
-    text = _fallback_briefing_text(_reading(), regime_results).lower()
-
-    for banned in _BANNED_WORDS:
-        assert banned not in text, f"leaked internal vocabulary: {banned!r}"
-
-
-def test_briefing_contains_the_three_required_closing_sections() -> None:
-    regime_results = _regime_results(
-        _uniform_states("POSITIVE"),
-        _uniform_states("POSITIVE"),
-        _uniform_states("POSITIVE"),
-    )
-
-    text = _fallback_briefing_text(_reading(), regime_results)
-
-    assert "**Portfolio Implications**" in text
-    assert "**Key Risks**" in text
-    assert "**Questions Worth Investigating**" in text
-    # Order matters: implications, then risks, then questions.
-    assert (
-        text.index("**Portfolio Implications**")
-        < text.index("**Key Risks**")
-        < text.index("**Questions Worth Investigating**")
-    )
-
-
-def test_rising_yields_are_described_as_a_headwind_not_a_tailwind() -> None:
-    # RATES pillar STRONGLY NEGATIVE == yields rising sharply in the real
-    # engine's sign convention (see analysis/regime/strategic.py). The
-    # briefing must never flip this into tailwind language.
-    regime_results = _regime_results(
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY NEGATIVE"},
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY NEGATIVE"},
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY NEGATIVE"},
-    )
-
-    text = _fallback_briefing_text(_reading(), regime_results).lower()
-
-    assert "risen" in text or "tightening financial conditions" in text
-    assert "fallen meaningfully" not in text
-
-
-def test_falling_yields_are_described_as_supportive() -> None:
-    regime_results = _regime_results(
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY POSITIVE"},
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY POSITIVE"},
-        {**_uniform_states("NEUTRAL"), "RATES": "STRONGLY POSITIVE"},
-    )
-
-    text = _fallback_briefing_text(_reading(), regime_results).lower()
-
-    assert "fallen meaningfully" in text or "eas" in text
-
-
-def test_no_regime_data_returns_a_graceful_message() -> None:
-    text = _fallback_briefing_text(_reading(), {})
-
-    assert text
-    assert "don't have" in text.lower()
-
-
-def test_narrative_sentences_join_grammatically() -> None:
-    regime_results = _regime_results(
-        {"EQUITY": "STRONGLY POSITIVE", "RATES": "STRONGLY NEGATIVE", "CREDIT": "STRONGLY POSITIVE", "MACRO": "NEUTRAL", "VOLATILITY": "STRONGLY NEGATIVE"},
-        {"EQUITY": "STRONGLY POSITIVE", "RATES": "STRONGLY NEGATIVE", "CREDIT": "STRONGLY POSITIVE", "MACRO": "NEUTRAL", "VOLATILITY": "STRONGLY NEGATIVE"},
-        {"EQUITY": "STRONGLY POSITIVE", "RATES": "STRONGLY NEGATIVE", "CREDIT": "STRONGLY POSITIVE", "MACRO": "NEUTRAL", "VOLATILITY": "STRONGLY NEGATIVE"},
-    )
-
-    text = _fallback_briefing_text(_reading(), regime_results)
-    narrative = text.split("\n\n")[0]
-
-    # No connector should be immediately followed by a capitalized word
-    # (that pattern is the "Meanwhile, Equity leadership..." bug).
-    for connector in ("Meanwhile, ", "At the same time, ", "In parallel, "):
-        if connector in narrative:
-            after = narrative.split(connector, 1)[1]
-            assert after[0].islower(), f"'{connector}' is followed by a capitalized word"
+    assert context["breadth"] == {"positive": 1, "total": 2}
+    assert context["equity_indices"]["S&P 500"]["last"] == 5000.0
+    assert context["executive_thesis"]["directional_view"] == "RISK-ON"
+    assert context["executive_thesis"]["confidence"] == "MODERATE"
+    assert "Tactical market regime shifted" in context["executive_thesis"]["what_changed"][0]

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
 from analysis.macro import build_macro_comment
+from analysis.regime import build_market_regime
 from charts.common import create_line_chart, create_yield_curve_chart
 from config.universe import (
     BOND_PRICE_PROXIES,
@@ -13,6 +15,7 @@ from config.universe import (
     CREDIT_UNIVERSE,
     CRYPTO_UNIVERSE,
     FX_UNIVERSE,
+    REGIME_UNIVERSE,
 )
 from core.metrics import build_market_table, normalized_frame, ratio_series
 from data.macro_live import (
@@ -22,6 +25,15 @@ from data.macro_live import (
     load_live_market_quotes,
 )
 from data.yahoo import download_close_batch, resolve_rate_series
+from macro.calendar import build_upcoming_releases
+from macro.cross_asset import build_cross_asset_snapshot
+from macro.executive_thesis import build_executive_market_thesis
+from macro.growth import build_growth_pillar
+from macro.inflation import build_inflation_pillar
+from macro.liquidity import build_liquidity_pillar
+from macro.provenance import methodology_coverage
+from ui.executive_market_thesis import render_executive_thesis_full
+from ui.macro_panels import render_calendar_panel, render_cross_asset_panel, render_pillar_deep_dive, render_pillar_summary_tile
 from ui.tables import style_market_table
 
 
@@ -45,6 +57,54 @@ def _cached_live_conditions() -> dict[str, MacroQuote]:
 @st.cache_data(ttl=21600, show_spinner=False)
 def _cached_ecb_curve() -> pd.DataFrame:
     return load_ecb_aaa_curve()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_regime_close() -> pd.DataFrame:
+    tickers = tuple(list(REGIME_UNIVERSE.values()) + list(CRYPTO_UNIVERSE.values()))
+    return download_close_batch(tickers, period="2y")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_growth_pillar():
+    return build_growth_pillar()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_inflation_pillar():
+    return build_inflation_pillar()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_liquidity_pillar():
+    return build_liquidity_pillar()
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _cached_calendar_events():
+    return build_upcoming_releases()
+
+
+def build_thesis_bundle():
+    """Assembles the regime results + Growth/Inflation/Liquidity pillars +
+    Cross-Asset snapshot + the shared Executive Market Thesis.
+
+    Not itself `st.cache_data`-wrapped: every expensive input (price
+    downloads, FRED/NY Fed fetches) is already cached above, and combining
+    them is cheap, deterministic Python. Command Center
+    (`views/overview.py`) calls this exact function too, so both pages
+    render the same thesis object — never two separate narratives.
+    """
+    close = _cached_regime_close()
+    regime_results = build_market_regime(close) if not close.empty else {}
+    growth = _cached_growth_pillar()
+    inflation = _cached_inflation_pillar()
+    liquidity = _cached_liquidity_pillar()
+    cross_asset = build_cross_asset_snapshot(regime_results, close)
+    thesis = build_executive_market_thesis(
+        regime_results=regime_results, growth=growth, inflation=inflation, liquidity=liquidity, cross_asset=cross_asset
+    )
+    return regime_results, growth, inflation, liquidity, cross_asset, thesis
 
 
 def _format_value(quote: MacroQuote) -> str:
@@ -197,25 +257,6 @@ def _rates_comment(rates: dict[str, MacroQuote]) -> str:
     return " ".join(comments) or "Rates interpretation is unavailable until the underlying market quotes are loaded."
 
 
-def _render_european_rates_snapshot(rates: dict[str, MacroQuote]) -> None:
-    import plotly.graph_objects as go
-    from charts.common import apply_terminal_layout
-
-    labels: list[str] = []
-    values: list[float] = []
-    for key in ("BUND 10Y", "ITALY 10Y"):
-        quote = rates.get(key)
-        if quote and quote.is_available:
-            labels.append(key)
-            values.append(float(quote.value))
-    if not values:
-        st.warning("European sovereign rates are temporarily unavailable from the configured providers.")
-        return
-    fig = go.Figure(go.Bar(x=labels, y=values, text=[f"{value:.3f}%" for value in values], textposition="outside"))
-    fig.update_layout(title="EUROPEAN 10Y SOVEREIGN YIELDS", yaxis_title="Yield %", showlegend=False)
-    st.plotly_chart(apply_terminal_layout(fig, 440), width="stretch", key="macro_european_snapshot")
-
-
 def render_rates_section() -> None:
     st.markdown("<div class='terminal-subheader'>GLOBAL RATES MONITOR</div>", unsafe_allow_html=True)
     render_live_rates_monitor()
@@ -235,8 +276,6 @@ def render_rates_section() -> None:
         if not euro_curve[column].dropna().empty
     ] if not euro_curve.empty else []
 
-    # First show the two headline curves with stable default maturities.
-    # The controls below affect only the historical comparison charts.
     st.markdown("<div class='terminal-subheader'>HEADLINE YIELD CURVES</div>", unsafe_allow_html=True)
     headline_us = [item for item in ("US 2Y", "US 5Y", "US 10Y", "US 30Y") if item in us_available]
     headline_euro = [item for item in ("2Y", "5Y", "10Y", "30Y") if item in euro_available]
@@ -276,7 +315,6 @@ def render_rates_section() -> None:
             fig.update_layout(title="EURO AREA AAA YIELD CURVE", yaxis_title="Yield %")
             st.plotly_chart(apply_terminal_layout(fig, 440), width="stretch", key="macro_euro_curve_headline")
 
-    # Controls belong immediately above the charts they modify.
     st.markdown("<div class='terminal-subheader'>CUSTOM YIELD HISTORY</div>", unsafe_allow_html=True)
     control_left, control_right = st.columns(2)
     with control_left:
@@ -373,12 +411,111 @@ def render_bond_proxies() -> None:
     st.caption("These are price/futures proxies and are not used to calculate the BTP-Bund yield spread.")
 
 
+def _render_fx_tab(close: pd.DataFrame, fx_table: pd.DataFrame) -> None:
+    if fx_table.empty:
+        st.warning("Dati FX non disponibili.")
+        return
+    reverse = {ticker: name for name, ticker in FX_UNIVERSE.items()}
+    renamed = close.rename(columns=reverse)
+    available = [name for name in FX_UNIVERSE if name in renamed.columns]
+    selected = _series_selector(
+        "VISIBLE FX SERIES", available, default=available, key="macro_selected_fx",
+        help_text="Choose which currency series appear in the chart and table.",
+    )
+    left, right = st.columns([1.6, 1])
+    with left:
+        if selected:
+            st.plotly_chart(
+                create_line_chart(normalized_frame(_selected_frame(renamed, selected)), "FX PERFORMANCE // BASE 100", "Base 100", 450),
+                width="stretch", key="macro_fx",
+            )
+        else:
+            st.info("Select at least one FX series to display the chart.")
+    with right:
+        visible_table = fx_table[fx_table["Strumento"].isin(selected)] if selected else fx_table.iloc[0:0]
+        st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True, height=450)
+
+
+def _render_commodities_tab(close: pd.DataFrame, commodity_table: pd.DataFrame) -> None:
+    if commodity_table.empty:
+        st.warning("Dati commodity non disponibili.")
+        return
+    reverse = {ticker: name for name, ticker in COMMODITY_UNIVERSE.items()}
+    renamed = close.rename(columns=reverse)
+    available = [name for name in COMMODITY_UNIVERSE if name in renamed.columns]
+    selected = _series_selector(
+        "VISIBLE COMMODITIES", available, default=available, key="macro_selected_commodities",
+        help_text="Choose which commodity series appear in the chart and table.",
+    )
+    left, right = st.columns([1.6, 1])
+    with left:
+        if selected:
+            st.plotly_chart(
+                create_line_chart(normalized_frame(_selected_frame(renamed, selected)), "COMMODITIES // BASE 100", "Base 100", 450),
+                width="stretch", key="macro_commodities",
+            )
+        else:
+            st.info("Select at least one commodity to display the chart.")
+    with right:
+        visible_table = commodity_table[commodity_table["Strumento"].isin(selected)] if selected else commodity_table.iloc[0:0]
+        st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True, height=450)
+
+
+def _render_crypto_tab(close: pd.DataFrame, crypto_table: pd.DataFrame) -> None:
+    if crypto_table.empty:
+        st.warning("Dati crypto non disponibili.")
+        return
+    reverse = {ticker: name for name, ticker in CRYPTO_UNIVERSE.items()}
+    renamed = close.rename(columns=reverse)
+    available = [name for name in CRYPTO_UNIVERSE if name in renamed.columns]
+    selected = _series_selector(
+        "VISIBLE CRYPTO SERIES", available, default=available, key="macro_selected_crypto",
+        help_text="Choose which crypto series appear in the chart and table.",
+    )
+    if selected:
+        st.plotly_chart(
+            create_line_chart(normalized_frame(_selected_frame(renamed, selected)), "CRYPTO // BASE 100", "Base 100", 450),
+            width="stretch", key="macro_crypto",
+        )
+    else:
+        st.info("Select at least one crypto series to display the chart.")
+    visible_table = crypto_table[crypto_table["Strumento"].isin(selected)] if selected else crypto_table.iloc[0:0]
+    st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True)
+
+
+def _render_credit_tab(close: pd.DataFrame, credit_table: pd.DataFrame) -> None:
+    if credit_table.empty:
+        st.warning("Dati credit proxy non disponibili.")
+        return
+    ratios = pd.DataFrame({
+        "HYG/LQD": ratio_series(close, "HYG", "LQD"),
+        "HYG/TLT": ratio_series(close, "HYG", "TLT"),
+    }).dropna(how="all")
+    available_ratios = list(ratios.columns)
+    selected_ratios = _series_selector(
+        "VISIBLE CREDIT RATIOS", available_ratios, default=available_ratios, key="macro_selected_credit_ratios",
+        help_text="Choose which credit-risk ratios appear in the chart.",
+    )
+    left, right = st.columns([1.5, 1])
+    with left:
+        if selected_ratios:
+            st.plotly_chart(
+                create_line_chart(normalized_frame(_selected_frame(ratios, selected_ratios)), "CREDIT RISK RATIOS // BASE 100", "Base 100", 450),
+                width="stretch", key="macro_credit",
+            )
+        else:
+            st.info("Select at least one credit ratio to display the chart.")
+    with right:
+        st.dataframe(style_market_table(credit_table), width="stretch", hide_index=True, height=450)
+
+
 def render_global_macro() -> None:
     _macro_css()
-    st.markdown("<div class='section-eyebrow'>MARKET ANALYSIS</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-eyebrow'>MARKET INTELLIGENCE</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Macro & Rates</div>", unsafe_allow_html=True)
     st.caption(
-        "Market prices refresh automatically while the page is open. Official macro and yield-curve series retain their native publication frequency."
+        "This page is the analytical source of truth for the platform's macro read — Command Center shows a "
+        "condensed slice of the same Executive Market Thesis, never a separate narrative."
     )
 
     with st.sidebar:
@@ -387,12 +524,67 @@ def render_global_macro() -> None:
             _cached_global_rates.clear()
             _cached_live_conditions.clear()
             _cached_ecb_curve.clear()
+            _cached_regime_close.clear()
+            _cached_growth_pillar.clear()
+            _cached_inflation_pillar.clear()
+            _cached_liquidity_pillar.clear()
+            _cached_calendar_events.clear()
             st.rerun()
         st.caption("INTRADAY: Yahoo market data · DAILY: official source · STALE: older than expected")
+        st.caption("Growth/Inflation/Liquidity require a free FRED_API_KEY in .env — see the Provenance section below.")
 
-    render_rates_section()
-    render_live_financial_conditions()
-    render_bond_proxies()
+    # --- 1-2: Executive Market Thesis + What Changed (first viewport, no charts) ---
+    with st.spinner("Building the macro regime read..."):
+        regime_results, growth, inflation, liquidity, cross_asset, thesis = build_thesis_bundle()
+
+    render_executive_thesis_full(thesis)
+
+    # --- 3: Current Macro Regime ---
+    st.markdown("<div class='terminal-subheader'>CURRENT MACRO REGIME</div>", unsafe_allow_html=True)
+    regime_cols = st.columns(4)
+    with regime_cols[0]:
+        render_pillar_summary_tile(growth)
+    with regime_cols[1]:
+        render_pillar_summary_tile(inflation)
+    with regime_cols[2]:
+        tactical = regime_results.get("TACTICAL")
+        rates_direction = tactical.diagnosis if tactical is not None else "UNKNOWN"
+        st.markdown(
+            "<div class='opp-card-metric'><span class='opp-card-metric-label'>Rates</span>"
+            f"<span class='opp-card-metric-value' style='font-size:.85rem'>{html.escape(rates_direction)}</span></div>",
+            unsafe_allow_html=True,
+        )
+    with regime_cols[3]:
+        render_pillar_summary_tile(liquidity)
+
+    # --- 4: Cross-Asset Confirmation ---
+    render_cross_asset_panel(cross_asset)
+
+    # --- 5: Key Risks & Upcoming Catalysts ---
+    st.markdown("<div class='terminal-subheader'>KEY RISKS &amp; UPCOMING CATALYSTS</div>", unsafe_allow_html=True)
+    risk_col, calendar_col = st.columns([1, 1.4])
+    with risk_col:
+        st.markdown("**Major Risks**")
+        for risk in thesis.major_risks:
+            st.markdown(f"<div class='risk-callout'>{html.escape(risk)}</div>", unsafe_allow_html=True)
+    with calendar_col:
+        st.markdown("**Upcoming Catalysts**")
+        render_calendar_panel(_cached_calendar_events())
+
+    # --- 6: Deep-Dive Sections ---
+    st.markdown("<div class='terminal-subheader'>DEEP-DIVE SECTIONS</div>", unsafe_allow_html=True)
+    deep_dive_tabs = st.tabs(["GROWTH", "INFLATION", "RATES", "LIQUIDITY", "CREDIT", "FX", "COMMODITIES", "CRYPTO"])
+
+    with deep_dive_tabs[0]:
+        render_pillar_deep_dive("GROWTH", growth)
+    with deep_dive_tabs[1]:
+        render_pillar_deep_dive("INFLATION", inflation)
+    with deep_dive_tabs[2]:
+        render_rates_section()
+        render_live_financial_conditions()
+        render_bond_proxies()
+    with deep_dive_tabs[3]:
+        render_pillar_deep_dive("LIQUIDITY", liquidity)
 
     macro_tickers = tuple(
         list(FX_UNIVERSE.values())
@@ -401,153 +593,37 @@ def render_global_macro() -> None:
         + list(CREDIT_UNIVERSE.values())
     )
     with st.spinner("Updating macro assets..."):
-        close = download_close_batch(macro_tickers, period="1y")
+        asset_close = download_close_batch(macro_tickers, period="1y")
 
-    fx_table = build_market_table(close, FX_UNIVERSE)
-    commodity_table = build_market_table(close, COMMODITY_UNIVERSE)
-    crypto_table = build_market_table(close, CRYPTO_UNIVERSE)
-    credit_table = build_market_table(close, CREDIT_UNIVERSE)
-    tabs = st.tabs(["FX", "COMMODITIES", "CRYPTO", "CREDIT"])
+    fx_table = build_market_table(asset_close, FX_UNIVERSE)
+    commodity_table = build_market_table(asset_close, COMMODITY_UNIVERSE)
+    crypto_table = build_market_table(asset_close, CRYPTO_UNIVERSE)
+    credit_table = build_market_table(asset_close, CREDIT_UNIVERSE)
 
-    with tabs[0]:
-        if fx_table.empty:
-            st.warning("Dati FX non disponibili.")
-        else:
-            reverse = {ticker: name for name, ticker in FX_UNIVERSE.items()}
-            renamed = close.rename(columns=reverse)
-            available = [name for name in FX_UNIVERSE if name in renamed.columns]
-            selected = _series_selector(
-                "VISIBLE FX SERIES",
-                available,
-                default=available,
-                key="macro_selected_fx",
-                help_text="Choose which currency series appear in the chart and table.",
-            )
-            left, right = st.columns([1.6, 1])
-            with left:
-                if selected:
-                    st.plotly_chart(
-                        create_line_chart(
-                            normalized_frame(_selected_frame(renamed, selected)),
-                            "FX PERFORMANCE // BASE 100",
-                            "Base 100",
-                            450,
-                        ),
-                        width="stretch",
-                        key="macro_fx",
-                    )
-                else:
-                    st.info("Select at least one FX series to display the chart.")
-            with right:
-                visible_table = fx_table[fx_table["Strumento"].isin(selected)] if selected else fx_table.iloc[0:0]
-                st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True, height=450)
-
-    with tabs[1]:
-        if commodity_table.empty:
-            st.warning("Dati commodity non disponibili.")
-        else:
-            reverse = {ticker: name for name, ticker in COMMODITY_UNIVERSE.items()}
-            renamed = close.rename(columns=reverse)
-            available = [name for name in COMMODITY_UNIVERSE if name in renamed.columns]
-            selected = _series_selector(
-                "VISIBLE COMMODITIES",
-                available,
-                default=available,
-                key="macro_selected_commodities",
-                help_text="Choose which commodity series appear in the chart and table.",
-            )
-            left, right = st.columns([1.6, 1])
-            with left:
-                if selected:
-                    st.plotly_chart(
-                        create_line_chart(
-                            normalized_frame(_selected_frame(renamed, selected)),
-                            "COMMODITIES // BASE 100",
-                            "Base 100",
-                            450,
-                        ),
-                        width="stretch",
-                        key="macro_commodities",
-                    )
-                else:
-                    st.info("Select at least one commodity to display the chart.")
-            with right:
-                visible_table = commodity_table[commodity_table["Strumento"].isin(selected)] if selected else commodity_table.iloc[0:0]
-                st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True, height=450)
-
-    with tabs[2]:
-        if crypto_table.empty:
-            st.warning("Dati crypto non disponibili.")
-        else:
-            reverse = {ticker: name for name, ticker in CRYPTO_UNIVERSE.items()}
-            renamed = close.rename(columns=reverse)
-            available = [name for name in CRYPTO_UNIVERSE if name in renamed.columns]
-            selected = _series_selector(
-                "VISIBLE CRYPTO SERIES",
-                available,
-                default=available,
-                key="macro_selected_crypto",
-                help_text="Choose which crypto series appear in the chart and table.",
-            )
-            if selected:
-                st.plotly_chart(
-                    create_line_chart(
-                        normalized_frame(_selected_frame(renamed, selected)),
-                        "CRYPTO // BASE 100",
-                        "Base 100",
-                        450,
-                    ),
-                    width="stretch",
-                    key="macro_crypto",
-                )
-            else:
-                st.info("Select at least one crypto series to display the chart.")
-            visible_table = crypto_table[crypto_table["Strumento"].isin(selected)] if selected else crypto_table.iloc[0:0]
-            st.dataframe(style_market_table(visible_table), width="stretch", hide_index=True)
-
-    with tabs[3]:
-        if credit_table.empty:
-            st.warning("Dati credit proxy non disponibili.")
-        else:
-            ratios = pd.DataFrame({
-                "HYG/LQD": ratio_series(close, "HYG", "LQD"),
-                "HYG/TLT": ratio_series(close, "HYG", "TLT"),
-            }).dropna(how="all")
-            available_ratios = list(ratios.columns)
-            selected_ratios = _series_selector(
-                "VISIBLE CREDIT RATIOS",
-                available_ratios,
-                default=available_ratios,
-                key="macro_selected_credit_ratios",
-                help_text="Choose which credit-risk ratios appear in the chart.",
-            )
-            left, right = st.columns([1.5, 1])
-            with left:
-                if selected_ratios:
-                    st.plotly_chart(
-                        create_line_chart(
-                            normalized_frame(_selected_frame(ratios, selected_ratios)),
-                            "CREDIT RISK RATIOS // BASE 100",
-                            "Base 100",
-                            450,
-                        ),
-                        width="stretch",
-                        key="macro_credit",
-                    )
-                else:
-                    st.info("Select at least one credit ratio to display the chart.")
-            with right:
-                st.dataframe(style_market_table(credit_table), width="stretch", hide_index=True, height=450)
+    with deep_dive_tabs[4]:
+        _render_credit_tab(asset_close, credit_table)
+    with deep_dive_tabs[5]:
+        _render_fx_tab(asset_close, fx_table)
+    with deep_dive_tabs[6]:
+        _render_commodities_tab(asset_close, commodity_table)
+    with deep_dive_tabs[7]:
+        _render_crypto_tab(asset_close, crypto_table)
 
     rates, _ = resolve_rate_series(period="6mo")
-    comment = build_macro_comment(rates, fx_table, commodity_table, close)
+    comment = build_macro_comment(rates, fx_table, commodity_table, asset_close)
     st.markdown("<div class='terminal-subheader'>MACRO STRATEGIST COMMENT</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='report-box'>{comment}</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='terminal-subheader'>DATA PROVENANCE</div>", unsafe_allow_html=True)
-    st.caption(
-        "US Treasury yields, DXY, VIX, Brent and Gold: Yahoo Finance market data. "
-        "Bund 10Y and Italy 10Y: Investing.com public sovereign-yield pages, with the Deutsche Bundesbank official daily Bund series as fallback. "
-        "BTP-Bund and US-Germany differentials are calculated from matching 10-year yields; the direct Investing.com spread is used only as fallback. "
-        "Euro AAA curve: ECB Data Portal. No ETF or bond-future prices are used as substitutes for sovereign yields."
-    )
+    with st.expander("METHODOLOGY & DATA PROVENANCE", expanded=False):
+        st.write(
+            "US Treasury yields, DXY, VIX, Brent and Gold: Yahoo Finance market data. "
+            "Bund 10Y and Italy 10Y: Investing.com public sovereign-yield pages, with the Deutsche Bundesbank official daily Bund series as fallback. "
+            "BTP-Bund and US-Germany differentials are calculated from matching 10-year yields; the direct Investing.com spread is used only as fallback. "
+            "Euro AAA curve: ECB Data Portal. No ETF or bond-future prices are used as substitutes for sovereign yields."
+        )
+        st.markdown("<b>Growth / Inflation / Liquidity / Calendar</b>", unsafe_allow_html=True)
+        coverage_rows = [
+            {"COMPONENT": item.component, "STATUS": item.status, "SOURCE": item.source, "NOTE": item.note}
+            for item in methodology_coverage()
+        ]
+        st.dataframe(pd.DataFrame(coverage_rows), width="stretch", hide_index=True)
