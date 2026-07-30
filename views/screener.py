@@ -27,6 +27,7 @@ from screener.relative_strength import (
     build_relative_strength_lab,
     build_sector_composites,
 )
+from screener.technical_enrichment import enrich_ticker
 from screener.universes import UNIVERSES, load_universe
 from ui.opportunity_cards import (
     render_leaders_laggards,
@@ -511,14 +512,34 @@ def render_market_screener() -> None:
     st.markdown("<div class='section-eyebrow'>WHERE OPPORTUNITY IS CONCENTRATING</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Opportunities</div>", unsafe_allow_html=True)
     st.caption(
-        "Signals follow the implemented public cyclical matrix; sector leadership and leaders/laggards "
-        "use adjusted-price performance over the selected window."
+        "Two independent engines share this page: Technical & Cyclical (always fast — the existing "
+        "matrix-driven screen, unchanged) and Fundamental (cache-backed and manually refreshed, since "
+        "Yahoo Finance has no bulk fundamentals endpoint). Switching modules never re-runs the other engine."
     )
 
-    controls = st.columns([1.25, 1, 2.75])
-    universe = controls[0].selectbox("INDEX UNIVERSE", list(UNIVERSES), index=0)
-    refresh = controls[1].button("REFRESH", type="primary", width="stretch")
-    controls[2].markdown(
+    st.session_state.setdefault("opportunities_universe", list(UNIVERSES)[0])
+    st.session_state.setdefault("opportunities_module", "TECHNICAL & CYCLICAL")
+
+    universe = st.selectbox("INDEX UNIVERSE", list(UNIVERSES), key="opportunities_universe")
+    active_module = st.segmented_control(
+        "OPPORTUNITIES MODULE",
+        ["TECHNICAL & CYCLICAL", "FUNDAMENTAL"],
+        key="opportunities_module",
+        width="stretch",
+    ) or "TECHNICAL & CYCLICAL"
+
+    if active_module == "TECHNICAL & CYCLICAL":
+        _render_technical_cyclical_opportunities(universe)
+    else:
+        from views.fundamental_opportunities import render_fundamental_opportunities
+
+        render_fundamental_opportunities(universe)
+
+
+def _render_technical_cyclical_opportunities(universe: str) -> None:
+    controls = st.columns([1, 3])
+    refresh = controls[0].button("REFRESH", type="primary", width="stretch")
+    controls[1].markdown(
         "<div class='small-note'><br>Price history is managed internally for indicator calculation and is not a user setting. "
         "Results are cached for one hour.</div>",
         unsafe_allow_html=True,
@@ -576,7 +597,15 @@ def render_market_screener() -> None:
 
     # --- Above the fold: snapshot, top opportunities, sector leadership ---
     render_snapshot(snapshot)
-    render_top_opportunities(select_top_opportunities(annotated, limit=6))
+    top = select_top_opportunities(annotated, limit=6)
+    enrichments = {}
+    for _, top_row in top.iterrows():
+        enrichment = enrich_ticker(
+            str(top_row["Ticker"]), str(top_row["Matrix Action"]), int(top_row.get("Rating", 0) or 0)
+        )
+        if enrichment is not None:
+            enrichments[str(top_row["Ticker"])] = enrichment
+    render_top_opportunities(top, enrichments)
     render_sector_leadership(sectors, window_label)
 
     # --- Leaders / laggards and the research funnel ---

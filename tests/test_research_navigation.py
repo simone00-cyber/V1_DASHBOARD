@@ -13,6 +13,7 @@ from caruso_analysis import (
     resample_ohlc,
     summarize_timeframe,
 )
+from fundamentals.models import FundamentalAnalysis
 from technical.assessment import build_technical_assessment
 from technical.engine import TechnicalSettings
 from ui.research_panels import _navigate_to_build_strategy, _navigate_to_compare_sector
@@ -49,9 +50,26 @@ def _fake_cyclical_analysis(ticker: str, period: str):
     return daily, daily_raw, frames, summaries, {}
 
 
+def _fake_fundamental_analysis(ticker: str) -> FundamentalAnalysis:
+    # No real Yahoo Finance fundamentals call in these AppTest smoke tests —
+    # exercises the "insufficient data" render path deterministically.
+    return FundamentalAnalysis(
+        ticker=ticker,
+        sufficient=False,
+        insufficiency_reason="Insufficient fundamental data for a reliable analysis. (test stub)",
+        metrics=None,
+        quality=None,
+        valuation=None,
+        rating=None,
+        narrative=None,
+        raw=None,
+    )
+
+
 def _install_fake_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("views.research._daily_prices", lambda ticker: _synthetic_daily())
     monkeypatch.setattr("views.research.load_cyclical_analysis", _fake_cyclical_analysis)
+    monkeypatch.setattr("views.research._fundamental_analysis", _fake_fundamental_analysis)
 
 
 def _research_script() -> None:
@@ -126,7 +144,14 @@ def test_research_page_renders_all_sections_without_error(monkeypatch):
 
     assert not at.exception
     body = "\n".join(m.value for m in at.markdown)
-    assert "RESEARCH SUMMARY" in body
+
+    # The unified Executive Research Summary replaces the old scattered
+    # Research Summary / Fundamental Executive Summary / Combined Thesis panels.
+    assert "EXECUTIVE RESEARCH SUMMARY" in body
+    for label in ("Business Quality", "Valuation", "Current Risk", "Investment Horizon", "Main Opportunity", "Main Risk", "Recommended Action"):
+        assert label in body
+
+    # Technical/Cyclical detail panels still exist, now inside topic tabs.
     assert "MARKET STRUCTURE" in body
     assert "KEY LEVELS" in body
     assert "DEVELOPING PATTERNS" in body
@@ -134,16 +159,12 @@ def test_research_page_renders_all_sections_without_error(monkeypatch):
     assert "MULTI-TIMEFRAME ALIGNMENT" in body
     assert "CYCLICAL POSITION" in body
 
-    # The chart is the primary read: it must render above every text panel.
+    # The chart is the primary read: it must render above every tab.
     assert len(at.get("plotly_chart")) >= 1
 
     # Hero header metrics (Ticker / Price / Trend / Risk / Regime).
     metric_labels = {m.label for m in at.metric}
     assert {"TICKER", "PRICE", "TREND", "RISK", "REGIME"}.issubset(metric_labels)
-
-    # Executive summary's seven glanceable facts.
-    for label in ("Overall View", "Confidence", "Best Setup", "Current Risk", "Key Trigger", "Invalidation", "Recommended Action"):
-        assert label in body
 
 
 def test_research_page_shows_recommended_action(monkeypatch):
@@ -154,6 +175,20 @@ def test_research_page_shows_recommended_action(monkeypatch):
     assert not at.exception
     body = "\n".join(m.value for m in at.markdown)
     assert "Recommended Action" in body
+
+
+def test_research_page_shows_insufficient_fundamental_data_gracefully(monkeypatch):
+    """The Executive Summary and the Fundamentals/Valuation/Financials tabs must
+    degrade gracefully — never crash — when fundamentals are insufficient."""
+    _install_fake_data(monkeypatch)
+    at = AppTest.from_function(_research_script)
+    at.run()
+
+    assert not at.exception
+    body = "\n".join(m.value for m in at.markdown)
+    body += "\n".join(str(i.value) for i in at.info)
+    body += "\n".join(str(c.value) for c in at.caption)
+    assert "Insufficient fundamental data for a reliable analysis" in body
 
 
 def test_build_strategy_button_prefills_ai_prompt_without_navigating(monkeypatch):

@@ -208,6 +208,28 @@ header[data-testid="stHeader"] {{ background:{PANEL} !important; border-bottom:1
     100% {{ transform: translateX(255%); }}
 }}
 
+/* ---- Executive Research Summary (institutional redesign) ---- */
+.conviction-badge {{ display:inline-flex; align-items:center; padding:.5rem 1rem; border-radius:10px; font-size:1.15rem; font-weight:800; letter-spacing:-0.01em; border:1px solid transparent; }}
+.conviction-badge.is-good {{ background:rgba(0,210,106,0.14); color:{GREEN}; border-color:rgba(0,210,106,0.4); }}
+.conviction-badge.is-warning {{ background:rgba(255,159,0,0.14); color:{ORANGE}; border-color:rgba(255,159,0,0.4); }}
+.conviction-badge.is-critical {{ background:rgba(255,59,59,0.14); color:{RED}; border-color:rgba(255,59,59,0.4); }}
+.conviction-badge.is-neutral {{ background:rgba(255,255,255,0.07); color:{MUTED}; border-color:{BORDER_SOFT}; }}
+.lens-chip-row {{ display:flex; gap:.45rem; flex-wrap:wrap; margin:.5rem 0 .8rem 0; }}
+.summary-line {{ display:flex; gap:.5rem; font-size:.86rem; line-height:1.5; padding:.2rem 0; }}
+.summary-line .summary-label {{ color:{MUTED}; font-weight:700; text-transform:uppercase; letter-spacing:.04em; font-size:.72rem; min-width:110px; padding-top:.15rem; }}
+.summary-line .summary-value {{ color:{TEXT}; flex:1; }}
+.thesis-headline {{ font-size:1rem; line-height:1.55; color:{TEXT}; margin:.6rem 0 .9rem 0; padding:.15rem 0; }}
+
+/* ---- Valuation range visual ---- */
+.valuation-range {{ margin:.9rem 0 .5rem 0; }}
+.valuation-range-labels {{ display:flex; justify-content:space-between; font-size:.72rem; color:{MUTED}; font-weight:700; text-transform:uppercase; letter-spacing:.03em; margin-bottom:.3rem; }}
+.valuation-range-track {{ position:relative; height:10px; border-radius:999px; background:linear-gradient(90deg, rgba(255,59,59,0.35), rgba(255,159,0,0.35), rgba(0,210,106,0.35)); border:1px solid {BORDER_SOFT}; }}
+.valuation-range-marker {{ position:absolute; top:-7px; width:2px; height:24px; background:{TEXT}; }}
+.valuation-range-marker .marker-tag {{ position:absolute; top:-20px; left:50%; transform:translateX(-50%); font-size:.68rem; font-weight:700; white-space:nowrap; color:{TEXT}; }}
+.valuation-range-marker.is-price {{ background:{ORANGE}; width:3px; height:28px; top:-9px; }}
+.valuation-range-marker.is-price .marker-tag {{ color:{ORANGE}; top:-22px; }}
+.valuation-range-values {{ display:flex; justify-content:space-between; font-family:{MONO_STACK}; font-size:.82rem; color:{TEXT}; margin-top:1.6rem; }}
+
 .ai-lab-header {{
     padding: 0.25rem 0 0.8rem 0;
 }}

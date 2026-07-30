@@ -65,7 +65,6 @@ def render_asset_workspace() -> None:
     active_module = st.segmented_control(
         "WORKSPACE MODULE",
         _WORKSPACE_MODULES,
-        default=st.session_state.workspace_module,
         key="workspace_module",
         on_change=_request_workspace_module,
         width="stretch",

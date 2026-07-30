@@ -58,6 +58,10 @@ def _install_fake_screen(monkeypatch: pytest.MonkeyPatch) -> pd.DataFrame:
         return result, "unit-test fixture", len(rows)
 
     monkeypatch.setattr("views.screener._run_screen", _fake_run_screen)
+    # The fixture tickers (AAA/BBB/CCC) aren't real — without this, the Top
+    # Opportunities cards' technical enrichment would try a real Yahoo Finance
+    # lookup for a nonexistent ticker on every test run.
+    monkeypatch.setattr("views.screener.enrich_ticker", lambda ticker, action, rating: None)
     return rows
 
 

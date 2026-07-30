@@ -15,45 +15,12 @@ from technical.assessment import TechnicalAssessment
 from technical.engine import PatternReliability
 from technical.market_structure import StructureRatings, build_structure_ratings
 from technical.multi_timeframe import MultiTimeframeAlignment
-
-
-def _stat_row(items: list[tuple[str, str]]) -> None:
-    """Compact stat tiles with a small, wrapping value font — unlike st.metric, long
-    values (e.g. a sequence label or a price range) are never clipped with an ellipsis."""
-    blocks = "".join(
-        "<div class='opp-card-metric'>"
-        f"<span class='opp-card-metric-label'>{html.escape(label)}</span>"
-        f"<span class='opp-card-metric-value' style='font-size:.88rem;white-space:normal;'>{html.escape(value)}</span>"
-        "</div>"
-        for label, value in items
-    )
-    st.markdown(f"<div class='opp-card-metrics'>{blocks}</div>", unsafe_allow_html=True)
-
-
-def _confidence_color(confidence: int) -> str:
-    if confidence >= 70:
-        return GREEN
-    if confidence >= 45:
-        return ORANGE
-    return RED
-
-
-def _direction_color(direction: str) -> str:
-    upper = direction.upper()
-    if "UP" in upper or "BULLISH" in upper:
-        return GREEN
-    if "DOWN" in upper or "BEARISH" in upper:
-        return RED
-    return MUTED
-
-
-def _stars(score: int, slots: int = 5) -> str:
-    filled = max(0, min(slots, round(score / 100 * slots)))
-    return "★" * filled + "☆" * (slots - filled)
+from ui.components import confidence_color, direction_color, stars, stat_row
+from ui.navigation_actions import navigate_to_build_strategy, navigate_to_opportunities
 
 
 def render_confidence_bar(confidence: int, components: dict[str, int] | None = None) -> None:
-    color = _confidence_color(confidence)
+    color = confidence_color(confidence)
     st.markdown(
         "<div class='confidence-row'>"
         f"<div class='confidence-track'><div class='confidence-fill' style='width:{confidence}%;background:{color}'></div></div>"
@@ -66,7 +33,8 @@ def render_confidence_bar(confidence: int, components: dict[str, int] | None = N
         st.markdown(f"<div class='small-note'>{html.escape(parts)}</div>", unsafe_allow_html=True)
 
 
-# --- Above the fold: hero header, chart (rendered by the view), executive summary ---
+# --- Above the fold: hero header (chart and the Executive Research Summary are
+# rendered by views/research.py and ui/executive_summary.py respectively) ---
 
 
 def render_hero_header(ticker: str, assessment: TechnicalAssessment, daily_frame: pd.DataFrame, signal_state: TacticalSignalState | None) -> None:
@@ -87,111 +55,18 @@ def render_hero_header(ticker: str, assessment: TechnicalAssessment, daily_frame
     cols[4].metric("REGIME", regime)
 
 
-_ACTION_PHRASES = {
-    "WATCH BREAKOUT": "Wait for breakout confirmation",
-    "CONTINUE MONITORING": "Continue monitoring",
-    "WAIT FOR CONFIRMATION": "Wait for multi-timeframe confirmation",
-    "REDUCE EXPOSURE / REASSESS": "Reduce exposure / reassess",
-}
-
-_POSTURE_STYLE = {
-    "WATCH BREAKOUT": "is-warning",
-    "CONTINUE MONITORING": "is-good",
-    "WAIT FOR CONFIRMATION": "is-info",
-    "REDUCE EXPOSURE / REASSESS": "is-critical",
-}
-
-
-def determine_posture(assessment: TechnicalAssessment, patterns: list[dict[str, Any]], cross_check: CrossCheckRead | None) -> str:
-    """A single recommended posture derived from what's already computed — never a
-    trading instruction, just the natural next research step."""
-    near_breakout = any((p.get("completion_pct") or 0) >= 60 and p["status"] == "DEVELOPING" for p in patterns)
-    if near_breakout:
-        return "WATCH BREAKOUT"
-    if cross_check is not None and cross_check.agreement == "DIVERGES":
-        return "WAIT FOR CONFIRMATION"
-    if assessment.risk_read.level == "ELEVATED" and assessment.trend_quality.label in {"WEAK", "NO CLEAR TREND"}:
-        return "REDUCE EXPOSURE / REASSESS"
-    return "CONTINUE MONITORING"
-
-
 def _navigate_to_build_strategy(ticker: str, company: str, assessment: TechnicalAssessment) -> None:
-    """Prefill the AI Strategy Lab prompt and navigate there if the page is registered."""
-    pages = st.session_state.get("_pages", {})
-    st.session_state["pending_ai_message"] = (
+    navigate_to_build_strategy(
         f"Build a strategy idea around {ticker} ({company}), using its current technical structure "
         f"({assessment.trend_quality.label.lower()}-quality {assessment.current_assessment.split(' is ')[-1]}) as context."
     )
-    if "AI Strategy Lab" in pages:
-        st.switch_page(pages["AI Strategy Lab"])
 
 
 def _navigate_to_compare_sector() -> None:
-    """Navigate to the Opportunities page (sector leadership) if it is registered."""
-    pages = st.session_state.get("_pages", {})
-    if "Opportunities" in pages:
-        st.switch_page(pages["Opportunities"])
+    navigate_to_opportunities()
 
 
-def render_research_summary(
-    ticker: str,
-    company: str,
-    assessment: TechnicalAssessment,
-    patterns: list[dict[str, Any]],
-    cross_check: CrossCheckRead | None,
-) -> None:
-    """The institutional executive summary: seven glanceable facts and the two next
-    actions, placed immediately after the chart — this, plus the chart itself, is
-    meant to be the whole "5 second read" of the page."""
-    overall_view = "BULLISH" if assessment.direction.startswith("UPTREND") else "BEARISH" if assessment.direction.startswith("DOWNTREND") else "NEUTRAL"
-    top_pattern = patterns[0] if patterns else None
-    best_setup = top_pattern["name"].replace("Potential ", "").title() if top_pattern else "No qualifying setup"
-
-    snapshot = assessment.snapshot
-    if top_pattern is not None and top_pattern.get("trigger") is not None:
-        key_trigger = f"Break {'above' if top_pattern['direction'] == 'BULLISH' else 'below'} {top_pattern['trigger']:,.2f}"
-    elif snapshot.resistance_low is not None:
-        key_trigger = f"Break above {snapshot.resistance_low:,.2f}"
-    elif snapshot.support_low is not None:
-        key_trigger = f"Break below {snapshot.support_low:,.2f}"
-    else:
-        key_trigger = "No defined level yet"
-
-    invalidation_text = f"{assessment.invalidation_price:,.2f}" if assessment.invalidation_price is not None else "N/A"
-    posture = determine_posture(assessment, patterns, cross_check)
-    action_text = _ACTION_PHRASES.get(posture, posture.title())
-    view_color = _direction_color(overall_view)
-
-    st.markdown("<div class='terminal-subheader'>RESEARCH SUMMARY</div>", unsafe_allow_html=True)
-    items = [
-        ("Overall View", overall_view, view_color),
-        ("Confidence", f"{assessment.confidence}%", None),
-        ("Best Setup", best_setup, None),
-        ("Current Risk", assessment.risk_read.level.title(), None),
-        ("Key Trigger", key_trigger, None),
-        ("Invalidation", invalidation_text, RED),
-        ("Recommended Action", action_text, None),
-    ]
-    def _exec_item(label: str, value: str, color: str | None) -> str:
-        style_attr = f' style="color:{color}"' if color else ""
-        return (
-            "<div class='exec-summary-item'>"
-            f"<span class='label'>{html.escape(label)}</span>"
-            f"<span class='value'{style_attr}>{html.escape(str(value))}</span>"
-            "</div>"
-        )
-
-    grid = "".join(_exec_item(label, str(value), color) for label, value, color in items)
-    st.markdown(f"<div class='exec-summary'><div class='exec-summary-grid'>{grid}</div></div>", unsafe_allow_html=True)
-
-    action_cols = st.columns(2)
-    if action_cols[0].button("Build Strategy", key="research_build_strategy", width="stretch", type="primary"):
-        _navigate_to_build_strategy(ticker, company, assessment)
-    if action_cols[1].button("Compare with Sector", key="research_compare_sector", width="stretch"):
-        _navigate_to_compare_sector()
-
-
-# --- Below the fold: the detail panels that explain the chart ---
+# --- Technical tab panels: the detail behind the chart and the top summary ---
 
 
 def render_market_structure_panel(assessment: TechnicalAssessment) -> None:
@@ -207,12 +82,12 @@ def render_market_structure_panel(assessment: TechnicalAssessment) -> None:
     ):
         st.markdown(
             f"<div class='star-row'><span class='star-label'>{label}</span>"
-            f"<span class='stars'>{_stars(score)}</span></div>",
+            f"<span class='stars'>{stars(score)}</span></div>",
             unsafe_allow_html=True,
         )
 
     st.markdown(f"<div class='insight-banner'>{html.escape(assessment.current_assessment)}</div>", unsafe_allow_html=True)
-    _stat_row(
+    stat_row(
         [
             ("Trend Quality", f"{assessment.trend_quality.label} ({assessment.trend_quality.score}/100)"),
             ("Swing Structure", assessment.trend_quality.swing_structure.sequence.title()),
@@ -221,15 +96,15 @@ def render_market_structure_panel(assessment: TechnicalAssessment) -> None:
         ]
     )
 
-    st.markdown("<b>Supporting evidence</b>", unsafe_allow_html=True)
-    st.markdown(
-        "<ul class='evidence-list'>" + "".join(f"<li>{html.escape(item)}</li>" for item in assessment.supporting_evidence) + "</ul>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(f"<div class='risk-callout'><b>Risk:</b> {html.escape(assessment.risk)}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='invalidation-callout'><b>Invalidation:</b> {html.escape(assessment.invalidation)}</div>", unsafe_allow_html=True)
-    st.markdown("<b>Confidence</b>", unsafe_allow_html=True)
-    render_confidence_bar(assessment.confidence, assessment.confidence_components)
+    with st.expander("Supporting evidence, risk & confidence detail", expanded=False):
+        st.markdown(
+            "<ul class='evidence-list'>" + "".join(f"<li>{html.escape(item)}</li>" for item in assessment.supporting_evidence) + "</ul>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(f"<div class='risk-callout'><b>Risk:</b> {html.escape(assessment.risk)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='invalidation-callout'><b>Invalidation:</b> {html.escape(assessment.invalidation)}</div>", unsafe_allow_html=True)
+        st.markdown("<b>Confidence</b>", unsafe_allow_html=True)
+        render_confidence_bar(assessment.confidence, assessment.confidence_components)
 
 
 def render_key_levels_panel(assessment: TechnicalAssessment) -> None:
@@ -239,7 +114,7 @@ def render_key_levels_panel(assessment: TechnicalAssessment) -> None:
     support_distance = f"{snapshot.distance_support_pct:+.2f}%" if snapshot.distance_support_pct is not None else "N/A"
     resistance_text = f"{snapshot.resistance_low:,.2f} – {snapshot.resistance_high:,.2f}" if snapshot.resistance_low else "N/A"
     resistance_distance = f"{snapshot.distance_resistance_pct:+.2f}%" if snapshot.distance_resistance_pct is not None else "N/A"
-    _stat_row(
+    stat_row(
         [
             ("Nearest Support", support_text),
             ("Distance to Support", support_distance),
@@ -280,7 +155,7 @@ def render_developing_patterns_panel(
                 f"<div class='pattern-card-meta'>{html.escape(pattern['category'])} · {html.escape(pattern['direction'])} · {completion_text}</div>",
                 unsafe_allow_html=True,
             )
-            _stat_row(
+            stat_row(
                 [
                     ("Confidence", f"{pattern['confidence']}/100"),
                     ("Expected Breakout Zone", zone_text),
@@ -304,7 +179,7 @@ def render_momentum_volatility_panel(assessment: TechnicalAssessment) -> None:
     snapshot = assessment.snapshot
     risk = assessment.risk_read
     volume_setups = [s for s in snapshot.setups if "volume" in s.lower()]
-    _stat_row(
+    stat_row(
         [
             ("RSI", f"{snapshot.rsi:.1f}" if snapshot.rsi is not None else "N/A"),
             ("Volatility Regime", risk.volatility_regime),
@@ -324,7 +199,7 @@ def render_multi_timeframe_panel(alignment: MultiTimeframeAlignment) -> None:
         return
     st.markdown(f"<div class='insight-banner'>{html.escape(alignment.summary)}</div>", unsafe_allow_html=True)
     for read in alignment.reads:
-        color = _direction_color(read.direction)
+        color = direction_color(read.direction)
         dominant_tag = " (DOMINANT)" if read.timeframe == alignment.dominant_timeframe else ""
         st.markdown(
             "<div class='dot-row'>"

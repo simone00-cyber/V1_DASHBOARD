@@ -107,3 +107,19 @@ def build_technical_assessment(ticker: str, frame: pd.DataFrame, settings: Techn
         risk_read=risk_read,
         snapshot=snapshot,
     )
+
+
+def derive_key_trigger(assessment: TechnicalAssessment, patterns: list[dict]) -> str:
+    """The single next price level that would confirm the featured setup —
+    shared by the Research page executive summary and the Opportunities
+    cards so both surfaces describe the same trigger the same way."""
+    snapshot = assessment.snapshot
+    top_pattern = patterns[0] if patterns else None
+    if top_pattern is not None and top_pattern.get("trigger") is not None:
+        direction_word = "above" if top_pattern["direction"] == "BULLISH" else "below"
+        return f"Break {direction_word} {top_pattern['trigger']:,.2f}"
+    if snapshot.resistance_low is not None:
+        return f"Break above {snapshot.resistance_low:,.2f}"
+    if snapshot.support_low is not None:
+        return f"Break below {snapshot.support_low:,.2f}"
+    return "No defined level yet"

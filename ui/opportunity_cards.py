@@ -13,25 +13,18 @@ from screener.opportunities import (
     build_regime_label,
     build_risk,
 )
+from screener.technical_enrichment import TechnicalCyclicalEnrichment
+from ui.navigation_actions import navigate_to_build_strategy, navigate_to_research
 
 
 def _open_in_research(ticker: str) -> None:
-    """Point the Research Workspace at `ticker` and navigate there if the page is registered."""
-    pages = st.session_state.get("_pages", {})
-    st.session_state["workspace_ticker"] = ticker
-    st.session_state["workspace_loading"] = True
-    if "Research Workspace" in pages:
-        st.switch_page(pages["Research Workspace"])
+    navigate_to_research(ticker)
 
 
 def _build_strategy(ticker: str, company: str) -> None:
-    """Hand `ticker` off to the AI Strategy Lab as a prefilled prompt and navigate there."""
-    pages = st.session_state.get("_pages", {})
-    st.session_state["pending_ai_message"] = (
+    navigate_to_build_strategy(
         f"Build a strategy idea around {ticker} ({company}), using its current cyclical matrix signal as context."
     )
-    if "AI Strategy Lab" in pages:
-        st.switch_page(pages["AI Strategy Lab"])
 
 
 def render_snapshot(snapshot: OpportunitySnapshot | None) -> None:
@@ -53,7 +46,7 @@ def render_snapshot(snapshot: OpportunitySnapshot | None) -> None:
     cards[4].metric("HIGH CONVICTION", snapshot.high_conviction_count)
 
 
-def _render_opportunity_card(row: pd.Series) -> None:
+def _render_opportunity_card(row: pd.Series, enrichment: TechnicalCyclicalEnrichment | None = None) -> None:
     ticker = str(row["Ticker"])
     company = str(row["Company"])
     sector = str(row["Sector"])
@@ -99,6 +92,28 @@ def _render_opportunity_card(row: pd.Series) -> None:
             unsafe_allow_html=True,
         )
 
+        if enrichment is not None:
+            st.markdown(
+                "<div class='opp-card-metrics'>"
+                "<div class='opp-card-metric'><span class='opp-card-metric-label'>Technical</span>"
+                f"<span class='opp-card-metric-value'>{html.escape(enrichment.technical_rating)}</span></div>"
+                "<div class='opp-card-metric'><span class='opp-card-metric-label'>Pattern</span>"
+                f"<span class='opp-card-metric-value' style='font-size:.82rem'>{html.escape(enrichment.pattern)}</span></div>"
+                "<div class='opp-card-metric'><span class='opp-card-metric-label'>Risk</span>"
+                f"<span class='opp-card-metric-value'>{html.escape(enrichment.current_risk)}</span></div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='opp-card-regime'>Structure: {html.escape(enrichment.current_structure)} &middot; "
+                f"Next trigger: {html.escape(enrichment.next_trigger)}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='opp-card-reason'><b>Investment thesis:</b> {html.escape(enrichment.thesis)}</div>",
+                unsafe_allow_html=True,
+            )
+
         action_cols = st.columns(2)
         if action_cols[0].button("Open in Research", key=f"opp_research_{ticker}", width="stretch", type="primary"):
             _open_in_research(ticker)
@@ -106,19 +121,23 @@ def _render_opportunity_card(row: pd.Series) -> None:
             _build_strategy(ticker, company)
 
 
-def render_top_opportunities(rows: pd.DataFrame) -> None:
+def render_top_opportunities(
+    rows: pd.DataFrame,
+    enrichments: dict[str, TechnicalCyclicalEnrichment] | None = None,
+) -> None:
     st.markdown("<div class='terminal-subheader'>TOP OPPORTUNITIES</div>", unsafe_allow_html=True)
     if rows.empty:
         st.info("No BUY-rated securities currently meet the matrix criteria in this universe.")
         return
 
+    enrichments = enrichments or {}
     per_row = 3
     for start in range(0, len(rows), per_row):
         chunk = rows.iloc[start : start + per_row]
         cols = st.columns(per_row)
         for col, (_, row) in zip(cols, chunk.iterrows()):
             with col:
-                _render_opportunity_card(row)
+                _render_opportunity_card(row, enrichments.get(str(row["Ticker"])))
 
 
 def render_sector_leadership(sectors: pd.DataFrame, window_label: str) -> None:

@@ -3,14 +3,33 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from analysis.combined_thesis import (
+    INSUFFICIENT,
+    build_combined_thesis,
+    derive_cyclical_verdict,
+    derive_fundamental_verdict,
+    derive_technical_verdict,
+)
 from analysis.cyclical import build_cyclical_engine
 from analysis.cyclical.technical_cross_check import CrossCheckRead, build_technical_cyclical_cross_check
 from analysis.security_signal import build_tactical_signal_state
 from charts.research_chart import build_research_chart
+from data.providers.fundamentals.yfinance_provider import YFinanceFundamentalsProvider
+from fundamentals.engine import build_fundamental_analysis
+from fundamentals.models import FundamentalAnalysis
 from screener.engine import download_universe_ohlc
 from technical.assessment import build_technical_assessment
 from technical.engine import PatternReliability, TechnicalSettings, compute_fibonacci_levels, estimate_pattern_reliability, parse_ma_periods
 from technical.multi_timeframe import build_multi_timeframe_alignment
+from ui.executive_summary import render_executive_research_summary
+from ui.fundamental_panels import (
+    render_business_quality_panel,
+    render_financial_statements_panel,
+    render_fundamental_narrative_panel,
+    render_fundamental_provenance_panel,
+    render_key_metrics_panel,
+    render_valuation_panel,
+)
 from ui.plotly import render_plotly
 from ui.research_panels import (
     render_cyclical_position_panel,
@@ -20,7 +39,6 @@ from ui.research_panels import (
     render_market_structure_panel,
     render_momentum_volatility_panel,
     render_multi_timeframe_panel,
-    render_research_summary,
 )
 from views.security import load_analysis as load_cyclical_analysis
 
@@ -29,6 +47,11 @@ from views.security import load_analysis as load_cyclical_analysis
 def _daily_prices(ticker: str) -> pd.DataFrame:
     data = download_universe_ohlc([ticker], period="max", chunk_size=1)
     return data.get(ticker, pd.DataFrame())
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=64)
+def _fundamental_analysis(ticker: str) -> FundamentalAnalysis:
+    return build_fundamental_analysis(ticker, YFinanceFundamentalsProvider())
 
 
 def _settings_panel(key_prefix: str) -> TechnicalSettings:
@@ -54,8 +77,8 @@ def _developing_or_leading_patterns(snapshot_diagnostics: dict, limit: int = 3) 
 
 def render_research(*, ticker_override: str | None = None, embedded: bool = False) -> None:
     if not embedded:
-        st.markdown("<div class='terminal-header'>RESEARCH WORKSPACE // CHART-CENTRIC MARKET STRUCTURE</div>", unsafe_allow_html=True)
-        st.caption("The chart is the primary read — structure, levels, the featured pattern, invalidation and cyclical turning points are all drawn on it. Everything below explains what's already visible above.")
+        st.markdown("<div class='terminal-header'>RESEARCH WORKSPACE // INSTITUTIONAL EQUITY RESEARCH</div>", unsafe_allow_html=True)
+        st.caption("The Executive Research Summary is the five-second read; the chart is the primary analytical surface below it. Technical, Cyclical, Fundamentals, Valuation and Financials are one tab away.")
 
     if ticker_override:
         ticker = ticker_override.strip().upper()
@@ -111,97 +134,128 @@ def render_research(*, ticker_override: str | None = None, embedded: bool = Fals
     except Exception:
         pass
 
+    try:
+        with st.spinner("Analysing fundamentals..."):
+            fundamental: FundamentalAnalysis | None = _fundamental_analysis(ticker)
+    except Exception:
+        fundamental = None
+
     company = ticker
     turning_points = signal_state.history if signal_state is not None else None
 
-    # --- Above the fold: hero header, the chart, the executive summary ---
+    combined = build_combined_thesis(
+        derive_fundamental_verdict(fundamental) if fundamental is not None else INSUFFICIENT,
+        derive_technical_verdict(assessment),
+        derive_cyclical_verdict(signal_state),
+    )
+
+    # --- Above the fold: hero strip, the five-second Executive Research Summary, the chart ---
     render_hero_header(ticker, assessment, daily_frame, signal_state)
+    render_executive_research_summary(ticker, company, assessment, fundamental, combined)
 
     chart = build_research_chart(ticker, daily_frame, settings, assessment, patterns, fib_levels, turning_points)
     render_plotly(chart, page="research", chart="primary", ticker=ticker, timeframe=settings.timeframe)
 
-    render_research_summary(ticker, company, assessment, patterns, cross_check)
+    # --- One coherent workflow: topic tabs instead of one long vertical stack ---
+    tabs = st.tabs(["TECHNICAL", "CYCLICAL", "FUNDAMENTALS", "VALUATION", "FINANCIALS"])
 
-    # --- Below the fold: the panels that explain what's on the chart ---
-    render_market_structure_panel(assessment)
-    render_key_levels_panel(assessment)
-    render_developing_patterns_panel(patterns, reliabilities)
-    render_momentum_volatility_panel(assessment)
-    render_multi_timeframe_panel(alignment)
+    with tabs[0]:
+        render_market_structure_panel(assessment)
+        render_key_levels_panel(assessment)
+        render_developing_patterns_panel(patterns, reliabilities)
+        render_momentum_volatility_panel(assessment)
+        render_multi_timeframe_panel(alignment)
 
-    if signal_state is not None and hierarchy is not None:
-        render_cyclical_position_panel(signal_state, hierarchy, cross_check, cycle_states)
-    else:
-        st.markdown("<div class='terminal-subheader'>CYCLICAL POSITION</div>", unsafe_allow_html=True)
-        st.info("Cyclical position unavailable — insufficient history to build the quarterly/monthly/weekly Composite Momentum hierarchy for this ticker.")
-
-    # --- Progressive disclosure ---
-    with st.expander("FULL PATTERN LIST", expanded=False):
-        details = assessment.snapshot.diagnostics.get("pattern_details", [])
-        if not details:
-            st.caption("No patterns currently meet the precision threshold.")
-        else:
-            table = pd.DataFrame(
-                [
-                    {
-                        "Pattern": d["name"],
-                        "Category": d["category"],
-                        "Direction": d["direction"],
-                        "Status": d["status"],
-                        "Confidence": d["confidence"],
-                        "Completion %": d.get("completion_pct"),
-                        "Trigger": d.get("trigger"),
-                        "Invalidation": d.get("invalidation"),
-                    }
-                    for d in details
-                ]
-            )
-            st.dataframe(table, width="stretch", hide_index=True)
-
-    with st.expander("SUPPORT / RESISTANCE DIAGNOSTICS", expanded=False):
-        for label, zones in (("SUPPORTS", assessment.snapshot.diagnostics.get("supports", [])), ("RESISTANCES", assessment.snapshot.diagnostics.get("resistances", []))):
-            st.markdown(f"**{label}**")
-            if not zones:
-                st.caption("None detected.")
-                continue
-            st.dataframe(pd.DataFrame(zones)[["center", "low", "high", "role", "state", "strength", "touches"]], width="stretch", hide_index=True)
-
-    if fib_levels is not None:
-        with st.expander("FIBONACCI RETRACEMENT DETAIL", expanded=False):
-            st.caption(f"{fib_levels.direction.title()} from {fib_levels.swing_start[1]:,.2f} to {fib_levels.swing_end[1]:,.2f}.")
-            st.dataframe(
-                pd.DataFrame([{"Level": label, "Price": price} for label, price in fib_levels.levels.items()]),
-                width="stretch",
-                hide_index=True,
-            )
-
-    if signal_state is not None:
-        with st.expander("CYCLICAL SIGNAL HISTORY", expanded=False):
-            if not signal_state.history:
-                st.caption("No documented matrix events in the available history.")
+        with st.expander("Full pattern list", expanded=False):
+            details = assessment.snapshot.diagnostics.get("pattern_details", [])
+            if not details:
+                st.caption("No patterns currently meet the precision threshold.")
             else:
-                history_rows = [
-                    {
-                        "DATE": event.date.strftime("%d/%m/%Y"),
-                        "EVENT": event.action,
-                        "RATING": "●" * event.rating,
-                        "QUARTERLY": event.quarterly_direction,
-                        "MONTHLY": event.monthly_direction,
-                        "WEEKLY": event.weekly_turn,
-                        "WEEKLY CM": round(event.weekly_composite, 2),
-                    }
-                    for event in reversed(signal_state.history[-12:])
-                ]
-                st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
+                table = pd.DataFrame(
+                    [
+                        {
+                            "Pattern": d["name"],
+                            "Category": d["category"],
+                            "Direction": d["direction"],
+                            "Status": d["status"],
+                            "Confidence": d["confidence"],
+                            "Completion %": d.get("completion_pct"),
+                            "Trigger": d.get("trigger"),
+                            "Invalidation": d.get("invalidation"),
+                        }
+                        for d in details
+                    ]
+                )
+                st.dataframe(table, width="stretch", hide_index=True)
 
-    with st.expander("METHODOLOGY &amp; PROVENANCE", expanded=False):
+        with st.expander("Support / resistance diagnostics", expanded=False):
+            for label, zones in (("SUPPORTS", assessment.snapshot.diagnostics.get("supports", [])), ("RESISTANCES", assessment.snapshot.diagnostics.get("resistances", []))):
+                st.markdown(f"**{label}**")
+                if not zones:
+                    st.caption("None detected.")
+                    continue
+                st.dataframe(pd.DataFrame(zones)[["center", "low", "high", "role", "state", "strength", "touches"]], width="stretch", hide_index=True)
+
+        if fib_levels is not None:
+            with st.expander("Fibonacci retracement detail", expanded=False):
+                st.caption(f"{fib_levels.direction.title()} from {fib_levels.swing_start[1]:,.2f} to {fib_levels.swing_end[1]:,.2f}.")
+                st.dataframe(
+                    pd.DataFrame([{"Level": label, "Price": price} for label, price in fib_levels.levels.items()]),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    with tabs[1]:
+        if signal_state is not None and hierarchy is not None:
+            render_cyclical_position_panel(signal_state, hierarchy, cross_check, cycle_states)
+            with st.expander("Cyclical signal history", expanded=False):
+                if not signal_state.history:
+                    st.caption("No documented matrix events in the available history.")
+                else:
+                    history_rows = [
+                        {
+                            "DATE": event.date.strftime("%d/%m/%Y"),
+                            "EVENT": event.action,
+                            "RATING": "●" * event.rating,
+                            "QUARTERLY": event.quarterly_direction,
+                            "MONTHLY": event.monthly_direction,
+                            "WEEKLY": event.weekly_turn,
+                            "WEEKLY CM": round(event.weekly_composite, 2),
+                        }
+                        for event in reversed(signal_state.history[-12:])
+                    ]
+                    st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
+        else:
+            st.markdown("<div class='terminal-subheader'>CYCLICAL POSITION</div>", unsafe_allow_html=True)
+            st.info("Cyclical position unavailable — insufficient history to build the quarterly/monthly/weekly Composite Momentum hierarchy for this ticker.")
+
+    with tabs[2]:
+        if fundamental is None:
+            st.info("Fundamental analysis unavailable for this ticker.")
+        else:
+            render_business_quality_panel(fundamental)
+            render_fundamental_narrative_panel(fundamental)
+
+    with tabs[3]:
+        if fundamental is None:
+            st.info("Fundamental analysis unavailable for this ticker.")
+        else:
+            render_valuation_panel(fundamental)
+
+    with tabs[4]:
+        if fundamental is None:
+            st.info("Fundamental analysis unavailable for this ticker.")
+        else:
+            render_financial_statements_panel(fundamental)
+            render_key_metrics_panel(fundamental)
+
+    with st.expander("METHODOLOGY & DATA PROVENANCE", expanded=False):
         st.write(
             "The chart is the primary analytical surface: candlesticks, volume, MA20/50/200, swing highs/lows, "
             "support/resistance zones (major vs. minor by strength), the featured pattern's boundaries/breakout "
             "zone/trigger, Fibonacci retracement levels for the most recent swing leg, the current invalidation "
             "level and — when available — the documented cyclical BUY/SELL SHORT/TAKE PROFIT turning points are "
-            "all drawn directly on it (technical/engine.py, charts/research_chart.py). The panels below only "
-            "explain what is already visible above."
+            "all drawn directly on it (technical/engine.py, charts/research_chart.py)."
         )
         st.write(
             "Pattern categories (triangles, flags, wedges, rectangles, double/triple top/bottom, head & shoulders, "
@@ -217,3 +271,5 @@ def render_research(*, ticker_override: str | None = None, embedded: bool = Fals
             "citation from 'La Metodologia Ciclica', shown as historical context only. The Technical × Cyclical "
             "cross-check only compares the two engines' outputs; it does not feed back into or alter either one."
         )
+        if fundamental is not None:
+            render_fundamental_provenance_panel()
